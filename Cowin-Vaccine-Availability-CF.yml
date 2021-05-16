@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  SupportEmail:
+    Description: Enter the email address for receiving the vaccine availability notifications.
+    Type: String
+Resources:
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties :
+      RoleName: Cowin-Vaccine-Availability-Role
+      AssumeRolePolicyDocument:
+        Version : 2012-10-17
+        Statement :
+          -
+            Effect : Allow
+            Principal :
+              Service :
+                - lambda.amazonaws.com
+            Action :
+              - sts:AssumeRole
+      Path : /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonSNSFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Tags:
+        - Key: PROJECT
+          Value: Cowin Vaccine Availability
+  LambdaBucket:
+    Type: AWS::S3::Bucket
+  ImportScript:
+    Type: Custom::CopyScript
+    DependsOn:
+      - LambdaFunctionImportZip
+      - LambdaBucket
+    Properties:
+      Tags:
+        - Key: PROJECT
+          Value: Cowin Vaccine Availability
+      ServiceToken: !GetAtt 'LambdaFunctionImportZip.Arn'
+      LambdaBucket: !Ref 'LambdaBucket'
+  LambdaFunctionImportZip:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Tags:
+        - Key: PROJECT
+          Value: Cowin Vaccine Availability
+      FunctionName: Cowin_ImportLambdaZip
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          import logging
+
+          logging.basicConfig()
+          logger = logging.getLogger(__name__)
+          logger.setLevel(logging.INFO)
+
+          def handler(event, context):
+            logger.info(json.dumps(event))
+            s3 = boto3.client('s3')
+            lambdaBucket = event['ResourceProperties']['LambdaBucket']
+
+            if event['RequestType'] == 'Delete':
+              try:
+                s3.delete_object(Bucket=lambdaBucket, Key='lambda.zip')
+                s3.delete_object(Bucket=lambdaBucket, Key='lambda.zip.temp')
+              except Exception as e:
+                logger.info(e.message)
+
+              logger.info('Delete Complete')
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Data': 'Delete Complete'})
+
+            else:
+              try:
+                s3.delete_object(Bucket=lambdaBucket, Key='lambda.zip')
+              except Exception as e:
+                logger.info(e.message)
+              try:
+                s3.copy_object(Bucket=lambdaBucket, CopySource="tusharglabs-codebase/cowin_vaccine_availability/lambda.zip", Key="lambda.zip")
+                logger.info('Copy Complete')
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Data': 'Copy complete'})
+
+              except Exception as e:
+                message = 'S3 Issue: '  + e.message
+                logger.error(message)
+                cfnresponse.send(event, context, cfnresponse.FAILED, {'Data': message})
+
+      Handler: index.handler
+      Role: !GetAtt 'ExecutionRole.Arn'
+      Runtime: python3.7
+    DependsOn: ExecutionRole
+  CowinAvailabilityFunction:
+    DependsOn: ImportScript
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: lambda_function.lambda_handler
+      FunctionName: CowinVaccineAvailability
+      Runtime: python3.7
+      Role: !GetAtt 'ExecutionRole.Arn'
+      Timeout: 300
+      Code:
+        S3Bucket: !Ref 'LambdaBucket'
+        S3Key: lambda.zip
+  ScheduledRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "ScheduledRule"
+      ScheduleExpression: "cron(* * * * ? *)"
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: !GetAtt 'CowinAvailabilityFunction.Arn'
+          Id: "TargetFunctionV1"
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref "CowinAvailabilityFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt 'ScheduledRule.Arn'
+  SnsTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: CowinVaccineAvailableTopic
+      Subscription:
+        - Endpoint:
+            Ref: SupportEmail
+          Protocol: email
+  SnsTopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: TrustLambdaToPublishEventsToMyTopic
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sns:Publish'
+            Resource:
+              Ref: SnsTopic
+      Topics:
+        - Ref: SnsTopic
